@@ -38,12 +38,7 @@ Python 3.9+
 
 安装依赖：
 ```bash
-pip install pillow numpy opencv-python scikit-learn tqdm
-```
-
-如果使用深度学习模型（可选）：
-```bash
-pip install torch torchvision
+pip install -r requirements.txt
 ```
 
 ## 🧠 运行示例
