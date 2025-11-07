@@ -1,0 +1,191 @@
+#################################
+# 🌍 通用忽略规则
+#################################
+# 系统文件
+.DS_Store
+Thumbs.db
+ehthumbs.db
+*.log
+*.tmp
+*.swp
+*.bak
+*.old
+*.orig
+*.sublime-workspace
+*.sublime-project
+
+# 环境变量文件
+.env
+.env.*
+!.env.example
+
+# 依赖缓存
+node_modules/
+bower_components/
+vendor/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 构建输出
+dist/
+build/
+out/
+coverage/
+htmlcov/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheels/
+*.whl
+
+# 虚拟环境
+venv/
+.env/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+#################################
+# 🐍 Python / Django 专用
+#################################
+# 数据库与迁移文件
+db.sqlite3
+*.db
+*.sqlite3
+*.sqlite
+*.pyc
+
+# Django 临时与缓存
+*.log
+*.pot
+*.mo
+local_settings.py
+media/
+staticfiles/
+static_cdn/
+tmp/
+celerybeat-schedule
+celerybeat.pid
+
+# PyInstaller
+*.manifest
+*.spec
+
+# 测试与覆盖率
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.tox/
+.pytest_cache/
+
+#################################
+# 🖥️ 前端项目（Vue / React / etc.）
+#################################
+# 编译输出
+/dist
+/.nuxt
+/.output
+/.next
+/build
+/public/static
+/public/build
+/.cache
+
+# 包管理
+/node_modules
+/.pnp
+.pnp.js
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 工具缓存
+/.eslintcache
+/.stylelintcache
+
+# Vue / React 临时文件
+*.local
+*.local.js
+*.local.json
+*.local.yml
+
+# 生产打包
+*.map
+
+#################################
+# 💡 IDE / 编辑器配置
+#################################
+# VSCode
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.template.json
+
+# IntelliJ IDEA / PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# JetBrains 缓存
+/.idea/
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/dataSources/
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/gradle.xml
+.idea/**/libraries/
+.idea/**/shelf/
+.idea/**/caches/
+.idea/**/dictionaries/
+.idea/**/inspectionProfiles/
+
+# VS / Rider
+*.user
+*.suo
+*.ntvs*
+*.njsproj
+*.sln.iml
+
+#################################
+# ⚙️ 其他工具
+#################################
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Pytype
+.pytype/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Mac/Linux/Windows OS
+*.lock
+.lock-wscript
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 临时文件
+tmp/
+temp/
+logs/
+__debug__/
+
+# custom
+gallery/
+deleted/
+data/
