@@ -1,5 +1,6 @@
 import io
 import mimetypes
+from urllib.parse import urlencode, urlparse
 from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
 from typing import Optional
 
@@ -7,6 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from app import Res
 from auth.sign_depends import verify_sign_dependency
+from auth.utils.sign_util import get_sign_util
 from common.utils import image_util
 import settings
 from PIL import Image, ImageDraw, ImageFont
@@ -17,8 +19,21 @@ engine_manager = get_image_search_manager()
 
 router = APIRouter(tags=["图库"], dependencies=[Depends(verify_sign_dependency)])
 
-def generate_url(image: dict | list[dict] = None):
-    pass
+async def generate_url(appid, images: dict | list[dict] = None):
+    if images is None: return None
+    if isinstance(images, dict):
+        images = [images]
+    
+    signutil = await get_sign_util(appid=appid)
+    for image in images:
+        url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["stored_name"])
+        parsed = urlparse(str(url))
+        url_path = parsed.path  # 不包含 query
+        sign_params = signutil.create_sign(params={
+            "url": url_path,
+        })
+        del sign_params["url"]
+        image["url"] = url + "?" + urlencode(sign_params)
 
 
 @router.get("/image", summary="获取图片列表")
@@ -39,6 +54,7 @@ async def image_list(
         keyword=keyword,
         order=order,
     )
+    await generate_url(appid=appid, images=res["results"])
     return Res().ok(res)
 
 @router.post("/image/search", summary="以图搜图")

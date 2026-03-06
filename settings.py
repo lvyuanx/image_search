@@ -15,6 +15,9 @@ INSERTAPPS = [
 
 HOST = "0.0.0.0"
 PORT = 8000
+
+IMAGE_PREVIEW_URL_TEMPLATE = "http://127.0.0.1:8000/api/image/preview/{group}/{name}"
+
 WORKERS = 1
 
 LOG_DIR = BASE_DIR / "logs"
