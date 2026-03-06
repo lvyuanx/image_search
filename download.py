@@ -4,8 +4,9 @@ import uuid
 import requests
 from ddgs import DDGS
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import settings
 
-SAVE_DIR = "gallery"
+SAVE_DIR = settings.BASE_DIR / "oss" / "media" / "groups" / "default" / "gallery"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 def download_image(url, idx):

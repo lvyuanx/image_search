@@ -1,13 +1,17 @@
 # app.py
+import logging
+import asyncio
+import importlib
 from typing import Any
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from image_search_engine import get_image_search_manager
+from common.utils import common_util
+import settings
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
-
-engine_manager = get_image_search_manager()
 
 class Res(BaseModel):
     code: int = Field(0, description="状态码")
@@ -24,26 +28,81 @@ class Res(BaseModel):
         return JSONResponse(content=self.model_dump(), status_code=200)
 
 
-@app.get("/image/list", summary="获取图片列表")
-async def image_list(
-    group: str = Query("default", description="图片分组"),
-    page: int = Query(1, description="页码"),
-    page_size: int = Query(20, description="每页数量"),
-    keyword: str = Query(None, description="搜索关键词"),
-    order: str = Query("desc", description="排序方式")
-):
-    res = engine_manager.list_gallery(
-        group=group,
-        page=page,
-        page_size=page_size,
-        keyword=keyword,
-        order=order,
-    )
-    return Res().ok(res)
+# 自动加载apps
+def load_apps():
+    for app_str in settings.INSERTAPPS:
+        try:
+            app_module = importlib.import_module(f"{app_str}.api")
+            if hasattr(app_module, "router"):
+                logger.info(f"Load app router: {app_str}")
+                app.include_router(app_module.router, prefix="/api")
+        except ModuleNotFoundError as e:
+            pass
+            
 
-@app.post("/image/add")
-async def image_add(file: UploadFile = File(..., description="图片"), group: str = Query("default", description="图片分组")):
-    if file.content_type not in ["image/jpeg", "image/png"]:
-        return Res().fail("不支持的文件格式")
-    res = engine_manager.add_images([(file.filename, file.file.read())], group)
-    return Res().ok(res)
+_uv_ready_event = asyncio.Event()
+
+async def _check_uv_ready(timeout: float = 10.0):
+        host = "127.0.0.1" if settings.HOST == "0.0.0.0" else settings.HOST
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout 
+
+        while loop.time() < deadline:
+            try:
+                reader, writer = await asyncio.open_connection(host, settings.PORT)
+                writer.close()
+                await writer.wait_closed()
+                _uv_ready_event.set()
+                return
+            except OSError:
+                await asyncio.sleep(0.1)
+
+        raise RuntimeError("Uvicorn 启动超时")
+
+async def _run_uvicorn():
+        import uvicorn
+
+        config = uvicorn.Config(
+            "app:app",
+            host=settings.HOST,
+            port=settings.PORT,
+            log_level=settings.LOG_LEVEL.lower(),
+            log_config=settings.LOGGING,
+            workers=settings.WORKERS,
+        )
+
+        server = uvicorn.Server(config)
+
+        # 异步启动 uvicorn
+        await server.serve()
+
+
+async def run():
+
+    load_apps()
+    
+    app_task = common_util.create_task_safe(_run_uvicorn())
+    common_util.create_task_safe(_check_uv_ready())
+
+    await _uv_ready_event.wait()
+    
+    logging.basicConfig(**settings.LOGGING)
+    
+    HOST = "127.0.0.1" if settings.HOST == "0.0.0.0" else settings.HOST
+    PORT = settings.PORT
+    
+    logger.warning(F"""
+    
+               
+    Uvicorn running on http://{HOST}:{PORT} (Press CTRL+C to quit)
+
+    Docs: http://{HOST}:{PORT}/docs
+
+
+""")
+
+    await asyncio.gather(app_task)
+
+
+
+    

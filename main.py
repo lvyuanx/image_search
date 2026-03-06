@@ -1,7 +1,5 @@
-from app import app
-from image_search_engine import warm_up_image_search
-import uvicorn
+import asyncio
+from app import run
 
 if __name__ == "__main__":
-    warm_up_image_search()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    asyncio.run(run())

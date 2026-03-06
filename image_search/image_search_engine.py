@@ -271,6 +271,88 @@ class ImageSearchEngine:
             "page_size": page_size,
             "results": items[start:end],
         }
+    
+    def rebuild_index(self) -> int:
+        """
+        重新扫描 gallery 重建索引
+        返回重建图片数量
+        """
+
+        with self._lock:
+
+            files = [
+                f for f in os.listdir(self.gallery_dir)
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+            ]
+
+            if not files:
+                self.index = faiss.IndexFlatIP(512)
+                self.filenames = []
+                self._save_index()
+                self._save_meta()
+                return 0
+
+            print(f"[ImageSearch] rebuilding index ({len(files)} images) ...")
+
+            features = []
+            meta = []
+
+            for filename in files:
+
+                path = os.path.join(self.gallery_dir, filename)
+
+                try:
+                    img = Image.open(path).convert("RGB")
+                    feat = self._extract_feature(img)
+
+                    features.append(feat)
+
+                    meta.append(
+                        {
+                            "stored_name": filename,
+                            "original_name": filename,
+                            "upload_time": datetime.fromtimestamp(
+                                os.path.getmtime(path)
+                            ).strftime("%Y%m%d_%H%M%S"),
+                        }
+                    )
+
+                except Exception as e:
+                    print(f"[ImageSearch] skip bad image: {filename} ({e})")
+
+            if not features:
+                return 0
+
+            features = np.vstack(features)
+
+            # 新建 index
+            new_index = faiss.IndexFlatIP(512)
+            new_index.add(features)
+
+            # 原子替换
+            self.index = new_index
+            self.filenames = meta
+
+            self._save_index()
+            self._save_meta()
+
+            print(f"[ImageSearch] rebuild finished ({len(meta)} images)")
+
+            return len(meta)
+    
+    def search_by_name_exact(self, name: str):
+        """
+        根据名称精确搜索
+        """
+
+        with self._lock:
+            results = []
+
+            for item in self.filenames:
+                if item["original_name"] == name:
+                    results.append(item)
+
+            return results
 
 
 # =========================================================
@@ -422,6 +504,49 @@ class ImageSearchManager:
             "page_size": page_size,
             "results": all_items[start:end],
         }
+    
+    
+    def rebuild_index(self, group: Optional[str] = None):
+        """
+        重建索引
+        """
+
+        if group:
+            return {group: self.get_engine(group).rebuild_index()}
+
+        results = {}
+
+        for g in self.list_groups():
+            results[g] = self.get_engine(g).rebuild_index()
+
+        return results
+
+    def search_by_name_exact(self, name: str, group: Optional[str] = None):
+        """
+        根据名称精确搜索
+        """
+
+        results = []
+
+        if group:
+            items = self.get_engine(group).search_by_name_exact(name)
+
+            for item in items:
+                item = dict(item)
+                item["group"] = group
+                results.append(item)
+
+            return results
+
+        for g in self.list_groups():
+            items = self.get_engine(g).search_by_name_exact(name)
+
+            for item in items:
+                item = dict(item)
+                item["group"] = g
+                results.append(item)
+
+        return results
 
 
 # =========================================================

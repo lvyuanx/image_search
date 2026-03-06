@@ -3,8 +3,11 @@ import os
 import shutil
 from PIL import Image, UnidentifiedImageError
 
-GALLERY_DIR = "gallery"
-DELETED_DIR = "deleted"
+import settings
+
+DEFAULT_DIR = settings.BASE_DIR / "oss" / "media" / "groups" / "default" 
+GALLERY_DIR = DEFAULT_DIR / "gallery"
+DELETED_DIR = DEFAULT_DIR / "deleted"
 
 os.makedirs(DELETED_DIR, exist_ok=True)
 
