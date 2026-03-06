@@ -1,5 +1,6 @@
 
 
+import os
 from pathlib import Path
 
 
@@ -8,6 +9,7 @@ DEBUG = True
 
 INSERTAPPS = [
     "image_search",
+    "auth",
 ]
 
 
@@ -109,3 +111,19 @@ LOGGING = {
         },
     },
 }
+
+
+
+# ------------- 数据库配置 -------------
+DB_USERNAME = os.environ.get("DB_USERNAME", "root")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "123456")
+DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
+DB_PORT = os.environ.get("DB_PORT", "3306")
+DB_DATABASE = os.environ.get("DB_DATABASE", "image_search")
+DB_CHARSET = os.environ.get("DB_CHARSET", "utf8mb4")
+DB_TIMEZONE = os.environ.get("DB_TIMEZONE", "Asia/Shanghai")
+DB_MAXSIZE = int(os.environ.get("DB_MAXSIZE", "20"))
+DB_MINSIZE = int(os.environ.get("DB_MINSIZE", "1"))
+DB_GENERATE_SCHEMAS = os.environ.get("DB_GENERATE_SCHEMAS", "True")
+
+

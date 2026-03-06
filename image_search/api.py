@@ -1,11 +1,12 @@
 import io
 import mimetypes
-from fastapi import File, Path, Query, UploadFile, APIRouter, UploadFile
+from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
 from typing import Optional
 
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from app import Res
+from auth.sign_depends import verify_sign_dependency
 from common.utils import image_util
 import settings
 from PIL import Image, ImageDraw, ImageFont
@@ -14,7 +15,7 @@ from .image_search_engine import get_image_search_manager
 engine_manager = get_image_search_manager()
 
 
-router = APIRouter(tags=["图库"])
+router = APIRouter(tags=["图库"], dependencies=[Depends(verify_sign_dependency)])
 
 def generate_url(image: dict | list[dict] = None):
     pass
@@ -27,6 +28,9 @@ async def image_list(
     page_size: int = Query(20, description="每页数量"),
     keyword: str = Query(None, description="搜索关键词"),
     order: str = Query("desc", description="排序方式"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
 ):
     res = engine_manager.list_gallery(
         group=group,
@@ -40,8 +44,15 @@ async def image_list(
 @router.post("/image/search", summary="以图搜图")
 def image_search(
     img_bytes: UploadFile = File(..., description="图片"),
+    md5: str = Query(None, description="图片 MD5"),
     group: str = Query("default", description="分组"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
 ):
+    file_md5 = image_util.calc_file_md5(img_bytes)
+    if md5 and md5 != file_md5:
+        return Res.fail("图片 MD5 不一致")
     res = engine_manager.search(img_bytes.file.read(), group=group)
     return Res().ok(res)
 
@@ -49,8 +60,15 @@ def image_search(
 @router.post("/image", summary="添加图片")
 async def image_add(
     file: UploadFile = File(..., description="图片"),
+    md5: str = Query(None, description="图片MD5"),
     group: str = Query("default", description="图片分组"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
 ):
+    file_md5 = image_util.calc_file_md5(file)
+    if md5 and md5 != file_md5:
+        return Res.fail("图片 MD5 不一致")
     if file.content_type not in ["image/jpeg", "image/png"]:
         return Res().fail("不支持的文件格式")
     res = engine_manager.add_images([(file.filename, file.file.read())], group)
@@ -61,13 +79,20 @@ async def image_add(
 async def image_delete(
     stored_name: str = Query(..., description="图片名称"),
     group: Optional[str] = Query(None, description="图片分组"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
 ):
     engine_manager.delete_image(stored_name, group)
     return Res().ok()
 
 
 @router.get("/image/rebuild", summary="重建索引")
-async def rebuild():
+async def rebuild(
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
+):
     engine_manager.rebuild_index()
     return Res().ok()
 
@@ -79,6 +104,9 @@ async def image_preview(
     w: int = Query(None, description="图片宽度"),
     h: int = Query(None, description="图片高度"),
     f: str = Query("contain", description="图片处理方式"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
 ):
 
     # 查询

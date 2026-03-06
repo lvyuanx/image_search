@@ -1,17 +1,25 @@
 # app.py
-import logging
 import asyncio
 import importlib
+import logging
 from typing import Any
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from common.utils import common_util
+
 import settings
+from common.orm import init_db
+from common.utils import common_util
+from image_search.image_search_engine import warm_up_image_search
 
 logger = logging.getLogger(__name__)
+warm_up_image_search()
 
 app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
+
+# ----------------------------- orm -----------------------------
+init_db(app)
 
 class Res(BaseModel):
     code: int = Field(0, description="状态码")
@@ -28,8 +36,9 @@ class Res(BaseModel):
         return JSONResponse(content=self.model_dump(), status_code=200)
 
 
-# 自动加载apps
-def load_apps():
+# ----------------------------- uvicorn -----------------------------
+
+def load_app_routers():
     for app_str in settings.INSERTAPPS:
         try:
             app_module = importlib.import_module(f"{app_str}.api")
@@ -69,6 +78,7 @@ async def _run_uvicorn():
             log_level=settings.LOG_LEVEL.lower(),
             log_config=settings.LOGGING,
             workers=settings.WORKERS,
+            lifespan="on",
         )
 
         server = uvicorn.Server(config)
@@ -79,14 +89,12 @@ async def _run_uvicorn():
 
 async def run():
 
-    load_apps()
+    load_app_routers()
     
     app_task = common_util.create_task_safe(_run_uvicorn())
     common_util.create_task_safe(_check_uv_ready())
 
     await _uv_ready_event.wait()
-    
-    logging.basicConfig(**settings.LOGGING)
     
     HOST = "127.0.0.1" if settings.HOST == "0.0.0.0" else settings.HOST
     PORT = settings.PORT
