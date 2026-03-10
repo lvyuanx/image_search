@@ -163,45 +163,11 @@ def compress_image(img: Image.Image, quality: int = 85) -> Image.Image:
     return Image.open(buffer)
 
 
-def calc_file_md5(
-    f: Union[str, BinaryIO, UploadFile],
-    chunk_size: int = 8192
-) -> str:
-    """
-    计算文件 MD5（32位十六进制）
-    
-    支持：
-    - 文件路径字符串
-    - UploadFile (FastAPI)
-    - file-like 对象 (可读二进制流)
-    """
+def calc_file_md5(file: UploadFile, chunk_size=8192):
     md5 = hashlib.md5()
-
-    # 文件路径
-    if isinstance(f, str):
-        with open(f, "rb") as fp:
-            for chunk in iter(lambda: fp.read(chunk_size), b""):
-                md5.update(chunk)
-        return md5.hexdigest()
-
-    # FastAPI UploadFile
-    if isinstance(f, UploadFile):
-        f = f.file  # 真实 file-like 对象
-
-    # file-like object
-    pos = None
-    try:
-        pos = f.tell()
-    except Exception:
-        pass  # 有些流不支持 tell()
-
+    f = file.file  # 同步文件对象
+    f.seek(0)
     for chunk in iter(lambda: f.read(chunk_size), b""):
         md5.update(chunk)
-
-    try:
-        if pos is not None:
-            f.seek(pos)  # 恢复指针
-    except Exception:
-        pass
-
+    f.seek(0)
     return md5.hexdigest()

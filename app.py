@@ -4,10 +4,11 @@ import importlib
 import logging
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from common.exceptions.business_exceptions import BusinessException
 import settings
 from common.orm import init_db
 from common.utils import common_util
@@ -17,9 +18,6 @@ logger = logging.getLogger(__name__)
 warm_up_image_search()
 
 app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
-
-# ----------------------------- orm -----------------------------
-init_db(app)
 
 class Res(BaseModel):
     code: int = Field(0, description="状态码")
@@ -34,6 +32,18 @@ class Res(BaseModel):
         self.code = code
         self.msg = msg
         return JSONResponse(content=self.model_dump(), status_code=200)
+    
+    
+@app.exception_handler(BusinessException)
+async def api_error_handler(request: Request, exc: BusinessException):
+    return JSONResponse(
+        status_code=200,
+        content=Res(code=exc.code, msg=exc.msg).model_dump()
+    )    
+
+# ----------------------------- orm -----------------------------
+init_db(app)
+
 
 
 # ----------------------------- uvicorn -----------------------------

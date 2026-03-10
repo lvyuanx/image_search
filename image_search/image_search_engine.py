@@ -16,6 +16,11 @@ from PIL import Image
 import settings
 
 
+IMAGE_SEARCH_WORKSPACES = settings.BASE_DIR / "oss" / "media" / "groups"
+
+GROUP_BACK = settings.BASE_DIR / "oss" / "media" / "back"
+
+
 
 # =========================================================
 # CLIP 全局单例（解决首次加载慢 + 多 group 重复加载问题）
@@ -160,7 +165,7 @@ class ImageSearchEngine:
                     {
                         "stored_name": new_name,
                         "original_name": filename,
-                        "upload_time": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                        "upload_time": datetime.now().strftime("%Y%m%d%H%M%S"),
                     }
                 )
 
@@ -213,22 +218,29 @@ class ImageSearchEngine:
     # 删除
     # =====================================================
 
-    def delete_image(self, stored_name: str) -> bool:
+    def delete_image(self, stored_name: str = None, origin_name: str = None) -> bool:
+        if stored_name is None and origin_name is None:
+            return False
+        
         with self._lock:
             self._ensure_index()
 
             index_to_remove = None
+            loca_stored_name = None
             for i, item in enumerate(self.filenames):
-                if item["stored_name"] == stored_name:
+                origin_pass = origin_name is None or item["original_name"] == origin_name
+                stored_pass = stored_name is None or item["stored_name"] == stored_name
+                if origin_pass and stored_pass:
                     index_to_remove = i
+                    loca_stored_name = item["stored_name"]
                     break
 
-            if index_to_remove is None:
+            if index_to_remove is None or loca_stored_name is None:
                 return False
 
-            src = os.path.join(self.gallery_dir, stored_name)
+            src = os.path.join(self.gallery_dir, loca_stored_name)
             if os.path.exists(src):
-                shutil.move(src, os.path.join(self.deleted_dir, stored_name))
+                shutil.move(src, os.path.join(self.deleted_dir, loca_stored_name))
 
             self.index.remove_ids(np.array([index_to_remove]))
             self._save_index()
@@ -410,12 +422,14 @@ class ImageSearchManager:
         engine = self.get_engine(group)
         return engine.add_images(files)
 
-    def delete_image(self, stored_name: str, group: Optional[str] = None):
+    def delete_image(self, stored_name: str = None, origin_name: str = None, group: Optional[str] = None):
+        if not stored_name and not origin_name: 
+            return False
         if group:
-            return self.get_engine(group).delete_image(stored_name)
+            return self.get_engine(group).delete_image(stored_name, origin_name)
 
         for g in self.list_groups():
-            if self.get_engine(g).delete_image(stored_name):
+            if self.get_engine(g).delete_image(stored_name, origin_name):
                 return True
 
         return False

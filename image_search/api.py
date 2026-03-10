@@ -1,5 +1,6 @@
 import io
 import mimetypes
+import imghdr
 from urllib.parse import urlencode, urlparse
 from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
 from typing import Optional
@@ -9,10 +10,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app import Res
 from auth.sign_depends import verify_sign_dependency
 from auth.utils.sign_util import get_sign_util
-from common.utils import image_util
+from common.utils import file_util, image_util, time_util
 import settings
 from PIL import Image, ImageDraw, ImageFont
-from .image_search_engine import get_image_search_manager
+from .image_search_engine import GROUP_BACK, IMAGE_SEARCH_WORKSPACES, get_image_search_manager
 
 engine_manager = get_image_search_manager()
 
@@ -26,7 +27,7 @@ async def generate_url(appid, images: dict | list[dict] = None):
     
     signutil = await get_sign_util(appid=appid)
     for image in images:
-        url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["stored_name"])
+        url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["original_name"])
         parsed = urlparse(str(url))
         url_path = parsed.path  # 不包含 query
         sign_params = signutil.create_sign(params={
@@ -58,18 +59,19 @@ async def image_list(
     return Res().ok(res)
 
 @router.post("/image/search", summary="以图搜图")
-def image_search(
-    img_bytes: UploadFile = File(..., description="图片"),
+async def image_search(
+    file: UploadFile = File(..., description="图片"),
     md5: str = Query(None, description="图片 MD5"),
     group: str = Query("default", description="分组"),
     sign: str = Query(None, description="签名"),
     appid: str = Query(None, description="应用ID"),
     timestamp: int = Query(None, description="时间戳"),
 ):
-    file_md5 = image_util.calc_file_md5(img_bytes)
+    file_md5 = image_util.calc_file_md5(file)
     if md5 and md5 != file_md5:
         return Res.fail("图片 MD5 不一致")
-    res = engine_manager.search(img_bytes.file.read(), group=group)
+    res = engine_manager.search(file.file.read(), group=group)
+    await generate_url(appid=appid, images=res)
     return Res().ok(res)
 
 
@@ -84,22 +86,27 @@ async def image_add(
 ):
     file_md5 = image_util.calc_file_md5(file)
     if md5 and md5 != file_md5:
-        return Res.fail("图片 MD5 不一致")
-    if file.content_type not in ["image/jpeg", "image/png"]:
+        return Res().fail("图片 MD5 不一致")
+    contents = await file.read()
+    file_type = imghdr.what(None, h=contents)
+    if file_type not in ["jpeg", "png", "jpg"]:
         return Res().fail("不支持的文件格式")
-    res = engine_manager.add_images([(file.filename, file.file.read())], group)
+    res = engine_manager.add_images([(file.filename, contents)], group)
     return Res().ok(res)
 
 
 @router.delete("/image", summary="删除图片")
 async def image_delete(
-    stored_name: str = Query(..., description="图片名称"),
+    stored_name: str = Query(None, description="图片保存名称"),
+    origin_name: str = Query(None, description="图片原始名称"),
     group: Optional[str] = Query(None, description="图片分组"),
     sign: str = Query(None, description="签名"),
     appid: str = Query(None, description="应用ID"),
     timestamp: int = Query(None, description="时间戳"),
 ):
-    engine_manager.delete_image(stored_name, group)
+    if not stored_name and not origin_name: 
+        return Res().fail("stored_name 和 origin_name 不能都为空")
+    engine_manager.delete_image(stored_name, origin_name, group)
     return Res().ok()
 
 
@@ -171,4 +178,29 @@ async def image_preview(
 
     
     
+@router.delete("/image/clear", summary="清空图片")
+def clear(
+    group: str = Query(..., description="图片分组"),
+    sign: str = Query(None, description="签名"),
+    appid: str = Query(None, description="应用ID"),
+    timestamp: int = Query(None, description="时间戳"),
+):
+    groups = engine_manager.list_groups()
+    if group not in groups:
+        return Res().fail("分组不存在")
     
+    group_path = IMAGE_SEARCH_WORKSPACES / group
+    
+    zip_name = f"{group}_{time_util.now_str('%Y%m%d%H%M%S')}.zip"
+    file_util.zip_dir(str(group_path), GROUP_BACK / zip_name)
+    
+    group_data = IMAGE_SEARCH_WORKSPACES  / group / "data"
+    file_util.clear_dir(group_data)
+    group_deleted = IMAGE_SEARCH_WORKSPACES  / group / "deleted"
+    file_util.clear_dir(group_deleted)
+    group_gallery = IMAGE_SEARCH_WORKSPACES  / group / "gallery"
+    file_util.clear_dir(group_gallery)
+    
+    engine_manager.rebuild_index(group)
+
+    return Res().ok(zip_name)

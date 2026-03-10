@@ -14,9 +14,9 @@ INSERTAPPS = [
 
 
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = 8001
 
-IMAGE_PREVIEW_URL_TEMPLATE = "http://127.0.0.1:8000/api/image/preview/{group}/{name}"
+IMAGE_PREVIEW_URL_TEMPLATE = "http://127.0.0.1:8001/api/image/preview/{group}/{name}"
 
 WORKERS = 1
 

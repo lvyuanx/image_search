@@ -2,6 +2,8 @@ from fastapi import HTTPException, Request
 from typing import Dict
 from urllib.parse import urlparse, parse_qsl
 from auth.utils.sign_util import get_sign_util
+from app import Res
+from common.exceptions.business_exceptions import BusinessException
 
 async def verify_sign_dependency(request: Request):
     """
@@ -25,9 +27,9 @@ async def verify_sign_dependency(request: Request):
                 body = await request.json()
                 if isinstance(body, dict):
                     body_params.update(body)
-            elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
-                form = await request.form()
-                body_params.update(form)
+            # elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+            #     form = await request.form()
+            #     body_params.update(form)
         except Exception:
             pass
 
@@ -39,7 +41,7 @@ async def verify_sign_dependency(request: Request):
     # 5️⃣ 检查 appid
     appid = params_for_sign.get("appid")
     if not appid:
-        raise HTTPException(status_code=403, detail="缺少 appid")
+        raise BusinessException(code=403, msg="appid 不能为空")
 
     # 6️⃣ 获取 SignUtil
     sign_util = await get_sign_util(appid)
@@ -49,4 +51,4 @@ async def verify_sign_dependency(request: Request):
 
     # 8️⃣ 校验签名
     if not sign_util.verify_sign(params_for_sign):
-        raise HTTPException(status_code=403, detail="签名校验失败")
+        raise BusinessException(code=403, msg="签名校验失败")

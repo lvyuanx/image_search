@@ -1,6 +1,6 @@
-from common.orm.orm import get_models
+import settings
 
 
-if __name__ == "__main__":
+GROUP_PATH_TEMPLATE = str(settings.BASE_DIR / "oss" / "media" / "image_search_workspaces" / "{group}")
 
-    print(get_models())
+print(GROUP_PATH_TEMPLATE.format(group="default"))
