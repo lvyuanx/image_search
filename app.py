@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from common.cache.redis_client import RedisClient
 from common.exceptions.business_exceptions import BusinessException
 import settings
 from common.orm import init_db
@@ -44,7 +45,13 @@ async def api_error_handler(request: Request, exc: BusinessException):
 # ----------------------------- orm -----------------------------
 init_db(app)
 
-
+# ----------------------------- redis -----------------------------
+RedisClient.init(
+    host=settings.REDIS_HOST,
+    port=settings.REDIS_PORT,
+    db=settings.REDIS_DB,
+    password=settings.REDIS_PASSWORD,
+)
 
 # ----------------------------- uvicorn -----------------------------
 
