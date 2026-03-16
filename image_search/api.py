@@ -8,8 +8,10 @@ from typing import Optional
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from app import Res
+from auth.models import Site
 from auth.sign_depends import verify_sign_dependency
 from auth.utils.sign_util import get_sign_util
+from common.exceptions.business_exceptions import BusinessException
 from common.utils import file_util, image_util, time_util
 import settings
 from PIL import Image, ImageDraw, ImageFont
@@ -67,6 +69,17 @@ async def image_search(
     appid: str = Query(None, description="应用ID"),
     timestamp: int = Query(None, description="时间戳"),
 ):
+    # 检查搜索次数配额
+    site = await Site.filter(appid=appid, is_active=True).first()
+    if not site:
+        raise BusinessException(code=403, msg="无效的 appid")
+    
+    if site.search_quota is not None:
+        if site.search_quota <= 0:
+            raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
+        # 扣减次数
+        await Site.filter(appid=appid).update(search_quota=site.search_quota - 1)
+    
     file_md5 = image_util.calc_file_md5(file)
     if md5 and md5 != file_md5:
         return Res.fail("图片 MD5 不一致")
