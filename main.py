@@ -1,10 +1,14 @@
 import asyncio
 import argparse
 import logging.config
+import sys
 
 from dotenv import load_dotenv
 
 import settings
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def main():

@@ -81,6 +81,10 @@ TORTOISE_ORM = {
                 "maxsize": MAXSIZE,
                 "charset": CHARSET,
                 "echo": True,
+                # 防止长时间闲置断开
+                "pool_recycle": 1800,     # 空闲 30 分钟自动重建
+                "connect_timeout": 10,    # 连接超时时间
+                "autocommit": True,       # 自动提交事务
             },
         }
     },
