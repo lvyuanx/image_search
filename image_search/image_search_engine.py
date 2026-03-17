@@ -434,7 +434,7 @@ class ImageSearchManager:
 
         return False
 
-    def search(self, img_bytes: bytes, group: Optional[str] = None, top_k: int = 5):
+    def search(self, img_bytes: bytes, group: Optional[str] = None, top_k: int = 10):
         results = []
 
         if group:

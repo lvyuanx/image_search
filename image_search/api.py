@@ -74,7 +74,7 @@ async def image_search(
     if not site:
         raise BusinessException(code=403, msg="无效的 appid")
     
-    if site.search_quota is not None:
+    if site.search_quota != -1:
         if site.search_quota <= 0:
             raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
         # 扣减次数

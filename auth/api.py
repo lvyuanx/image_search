@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from auth.sign_depends import verify_sign_dependency
 from auth.utils.sign_util import SignUtil
 import secrets
@@ -43,7 +43,7 @@ async def site_info(
 ):
     site = await Site.get_or_none(appid=appid)
     if not site or site.secret_key != secret_key:
-        return Res.fail(msg="应用不存在或密钥错误")
+        return  Res().fail(msg="应用不存在或密钥错误")
     
     return Res().ok(data={
         "appid": site.appid,
@@ -105,27 +105,25 @@ async def create_jdk(
 @router.post("/auth/jdk/redeem", summary="兑换 JDK 次数", dependencies=[Depends(verify_sign_dependency)])
 async def redeem_jdk(
     request: Request,
-    code: str = Body(..., description="兑换码"),
-    appid: str = Body(..., description="应用ID"),
-    sign: str = Body(None, description="签名"),
-    timestamp: int = Body(None, description="时间戳"),
+    code: str = Query(..., description="兑换码"),
 ):
     """使用 JDK 兑换搜索次数"""
+    appid = request.state.appid 
     # 验证站点
     site = await Site.get_or_none(appid=appid)
     if not site or site.secret_key != request.state.secret_key:
-        return Res.fail(msg="应用不存在或密钥错误")
+        return  Res().fail(msg="应用不存在或密钥错误")
 
     # 查询兑换卡
     jdk = await JdkCard.get_or_none(code=code)
     if not jdk:
-        return Res.fail(msg="兑换码不存在")
+        return  Res().fail(msg="兑换码不存在")
 
     if jdk.is_used:
-        return Res.fail(msg="兑换码已使用")
+        return  Res().fail(msg="兑换码已使用")
 
     if jdk.expired_at and jdk.expired_at < int(time_util.now_timestamp()):
-        return Res.fail(msg="兑换码已过期")
+        return  Res().fail(msg="兑换码已过期")
 
     # 标记已使用
     now = int(time_util.now_timestamp())
@@ -149,13 +147,12 @@ async def redeem_jdk(
 
 @router.post("/auth/quota", summary="获取剩余搜索次数", dependencies=[Depends(verify_sign_dependency)])
 async def get_quota(
-    request: Request,
-    appid: str = Body(..., description="应用ID"),
+    request: Request
 ):
     """获取站点的剩余搜索次数"""
-    site = await Site.get_or_none(appid=appid)
+    site = await Site.get_or_none(appid= request.state.appid)
     if not site or site.secret_key != request.state.secret_key:
-        return Res.fail(msg="应用不存在或密钥错误")
+        return  Res().fail(msg="应用不存在或密钥错误")
     
     return Res().ok(data={
         "search_quota": site.search_quota,
