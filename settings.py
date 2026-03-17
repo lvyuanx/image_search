@@ -135,4 +135,11 @@ REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
 REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
 
+# ------------- 后台登录 -------------
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "change-me")
+
+
+
 

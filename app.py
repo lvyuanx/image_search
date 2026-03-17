@@ -5,10 +5,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
+
 from pydantic import BaseModel, Field
 
 from common.cache.redis_client import RedisClient
@@ -21,14 +24,67 @@ from image_search.image_search_engine import warm_up_image_search
 logger = logging.getLogger(__name__)
 warm_up_image_search()
 
+app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
+
 # 模板和静态文件
+
+
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
-app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
+DOC_PATHS = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
+
+
+@app.get("/login")
+async def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+
+
+@app.post("/api/auth/login")
+async def login_api(request: Request, username: str = Form(...), password: str = Form(...)):
+    if username != settings.ADMIN_USERNAME or password != settings.ADMIN_PASSWORD:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "用户名或密码错误"},
+            status_code=401,
+        )
+
+    request.session["logged_in"] = True
+    return RedirectResponse(url="/docs", status_code=302)
+
+
+
+@app.middleware("http")
+async def docs_auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    if path.startswith("/api") or path.startswith("/static") or path == "/login":
+        return await call_next(request)
+
+    if path in DOC_PATHS:
+        is_logged_in = bool(request.session.get("logged_in"))
+        if not is_logged_in:
+            return RedirectResponse(url="/login", status_code=302)
+
+
+    return await call_next(request)
+
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SESSION_SECRET_KEY,
+    session_cookie="admin_session",
+    same_site="lax",
+    https_only=False,
+)
+
 
 class Res(BaseModel):
+
+
+
     code: int = Field(0, description="状态码")
     msg: str = Field("成功", description="状态信息")
     data: Any = Field(None, description="数据")
