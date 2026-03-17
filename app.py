@@ -2,10 +2,13 @@
 import asyncio
 import importlib
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from common.cache.redis_client import RedisClient
@@ -17,6 +20,11 @@ from image_search.image_search_engine import warm_up_image_search
 
 logger = logging.getLogger(__name__)
 warm_up_image_search()
+
+# 模板和静态文件
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 app = FastAPI(title="以图搜图服务", description="基于 CLIP + FAISS 的可复用图像搜索引擎")
 

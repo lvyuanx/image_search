@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Depends, Request
+from auth.sign_depends import verify_sign_dependency
 from auth.utils.sign_util import SignUtil
 import secrets
 import settings
@@ -101,16 +102,18 @@ async def create_jdk(
     return Res().ok(data=jdk_list)
 
 
-@router.post("/auth/jdk/redeem", summary="兑换 JDK 次数")
+@router.post("/auth/jdk/redeem", summary="兑换 JDK 次数", dependencies=[Depends(verify_sign_dependency)])
 async def redeem_jdk(
+    request: Request,
     code: str = Body(..., description="兑换码"),
     appid: str = Body(..., description="应用ID"),
-    secret_key: str = Body(..., description="应用密钥"),
+    sign: str = Body(None, description="签名"),
+    timestamp: int = Body(None, description="时间戳"),
 ):
     """使用 JDK 兑换搜索次数"""
     # 验证站点
     site = await Site.get_or_none(appid=appid)
-    if not site or site.secret_key != secret_key:
+    if not site or site.secret_key != request.state.secret_key:
         return Res.fail(msg="应用不存在或密钥错误")
 
     # 查询兑换卡
@@ -141,4 +144,19 @@ async def redeem_jdk(
     return Res().ok(data={
         "quota": jdk.quota,
         "total_quota": current_quota + jdk.quota,
+    })
+
+
+@router.post("/auth/quota", summary="获取剩余搜索次数", dependencies=[Depends(verify_sign_dependency)])
+async def get_quota(
+    request: Request,
+    appid: str = Body(..., description="应用ID"),
+):
+    """获取站点的剩余搜索次数"""
+    site = await Site.get_or_none(appid=appid)
+    if not site or site.secret_key != request.state.secret_key:
+        return Res.fail(msg="应用不存在或密钥错误")
+    
+    return Res().ok(data={
+        "search_quota": site.search_quota,
     })
