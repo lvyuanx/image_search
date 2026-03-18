@@ -3,8 +3,6 @@ import argparse
 import logging.config
 import sys
 
-from dotenv import load_dotenv
-
 import settings
 
 if sys.platform.startswith("win"):
@@ -32,8 +30,6 @@ def main():
     sub.add_parser("migrate", help="Apply database migrations")
 
     args = parser.parse_args()
-
-    load_dotenv()
 
     if args.command == "run":
         from app import run

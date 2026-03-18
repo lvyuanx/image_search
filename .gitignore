@@ -189,3 +189,5 @@ __debug__/
 gallery/
 deleted/
 data/
+
+config.py

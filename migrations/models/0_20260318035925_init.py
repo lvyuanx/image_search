@@ -5,7 +5,13 @@ RUN_IN_TRANSACTION = True
 
 async def upgrade(db: BaseDBAsyncClient) -> str:
     return """
-        CREATE TABLE IF NOT EXISTS `t_jdk_card` (
+        CREATE TABLE IF NOT EXISTS `aerich` (
+    `id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+    `version` VARCHAR(255) NOT NULL,
+    `app` VARCHAR(100) NOT NULL,
+    `content` JSON NOT NULL
+) CHARACTER SET utf8mb4;
+CREATE TABLE IF NOT EXISTS `t_jdk_card` (
     `id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT COMMENT 'ID',
     `code` VARCHAR(32) NOT NULL UNIQUE COMMENT '兑换码',
     `quota` INT NOT NULL COMMENT '包含的搜索次数' DEFAULT 0,
@@ -16,17 +22,22 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     `expired_at` BIGINT COMMENT '过期时间',
     KEY `idx_t_jdk_card_code_bcf79c` (`code`)
 ) CHARACTER SET utf8mb4 COMMENT='JDK 兑换卡表';
-        ALTER TABLE `t_site` ALTER COLUMN `search_quota` SET DEFAULT 100;
-        ALTER TABLE `t_site` MODIFY COLUMN `search_quota` INT NOT NULL COMMENT '搜索次数配额，null 表示不限制，默认为 100' DEFAULT 100;
-        ALTER TABLE `t_site` MODIFY COLUMN `search_quota` INT NOT NULL COMMENT '搜索次数配额，null 表示不限制，默认为 100' DEFAULT 100;"""
+CREATE TABLE IF NOT EXISTS `t_site` (
+    `id` INT NOT NULL PRIMARY KEY AUTO_INCREMENT COMMENT '站点ID',
+    `appid` VARCHAR(64) NOT NULL UNIQUE COMMENT '应用ID',
+    `secret_key` VARCHAR(64) NOT NULL COMMENT '应用密钥',
+    `name` VARCHAR(64) NOT NULL COMMENT '站点名称',
+    `is_active` BOOL NOT NULL COMMENT '是否启用' DEFAULT 1,
+    `search_quota` INT NOT NULL COMMENT '搜索次数配额，null 表示不限制，默认为 100' DEFAULT 100,
+    `remark` VARCHAR(255) COMMENT '备注',
+    `updated_at` BIGINT NOT NULL COMMENT '更新时间',
+    KEY `idx_t_site_appid_725fee` (`appid`)
+) CHARACTER SET utf8mb4 COMMENT='站点应用表';"""
 
 
 async def downgrade(db: BaseDBAsyncClient) -> str:
     return """
-        ALTER TABLE `t_site` MODIFY COLUMN `search_quota` INT COMMENT '搜索次数配额，null 表示不限制';
-        ALTER TABLE `t_site` ALTER COLUMN `search_quota` DROP DEFAULT;
-        ALTER TABLE `t_site` MODIFY COLUMN `search_quota` INT COMMENT '搜索次数配额，null 表示不限制';
-        DROP TABLE IF EXISTS `t_jdk_card`;"""
+        """
 
 
 MODELS_STATE = (

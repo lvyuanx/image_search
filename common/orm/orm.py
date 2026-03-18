@@ -100,7 +100,7 @@ TORTOISE_ORM = {
 
 
 def init_db(app):
-   register_tortoise(app=app, config=TORTOISE_ORM) 
+    register_tortoise(app=app, config=TORTOISE_ORM) 
     
 
 def makemigrations():

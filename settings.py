@@ -1,11 +1,36 @@
 
 
-import os
+import importlib
 from pathlib import Path
+
+# 用于标记无默认值
+NONE = object()
+
+# 尝试导入本地 config.py
+try:
+    local_config = importlib.import_module("config")
+except ModuleNotFoundError:
+    local_config = None
+
+def merge_config(name, default=NONE):
+    """
+    从 config.py 获取配置，如果没有则使用 default
+    如果 default 为 NONE 且 config.py 没有该配置，则报错
+    """
+    # 1️⃣ 优先从 config.py 获取
+    if local_config and hasattr(local_config, name):
+        return getattr(local_config, name)
+    
+    # 2️⃣ 再使用 default
+    if default is not NONE:
+        return default
+
+    # 3️⃣ 都没有则报错
+    raise ValueError(f"Config '{name}' not found in config.py and no default provided")
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEBUG = True
+DEBUG = merge_config("DEBUG", True)
 
 INSERTAPPS = [
     "image_search",
@@ -16,7 +41,7 @@ INSERTAPPS = [
 HOST = "0.0.0.0"
 PORT = 8001
 
-IMAGE_PREVIEW_URL_TEMPLATE = "http://127.0.0.1:8001/api/image/preview/{group}/{name}"
+IMAGE_PREVIEW_URL_TEMPLATE = merge_config("IMAGE_PREVIEW_URL_TEMPLATE", "http://127.0.0.1:8701/api/image/preview/{group}/{name}")
 
 WORKERS = 1
 
@@ -116,29 +141,28 @@ LOGGING = {
 }
 
 
+# ----------------- 数据库配置 -----------------
+DB_USERNAME = merge_config("DB_USERNAME", "root")
+DB_PASSWORD = merge_config("DB_PASSWORD", "123456")
+DB_HOST = merge_config("DB_HOST", "127.0.0.1")
+DB_PORT = int(merge_config("DB_PORT", 3306))
+DB_DATABASE = merge_config("DB_DATABASE", "image_search")
+DB_CHARSET = merge_config("DB_CHARSET", "utf8mb4")
+DB_TIMEZONE = merge_config("DB_TIMEZONE", "Asia/Shanghai")
+DB_MAXSIZE = int(merge_config("DB_MAXSIZE", 20))
+DB_MINSIZE = int(merge_config("DB_MINSIZE", 1))
+DB_GENERATE_SCHEMAS = merge_config("DB_GENERATE_SCHEMAS", True)
 
-# ------------- 数据库配置 -------------
-DB_USERNAME = os.environ.get("DB_USERNAME", "root")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "123456")
-DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
-DB_PORT = os.environ.get("DB_PORT", "3306")
-DB_DATABASE = os.environ.get("DB_DATABASE", "image_search")
-DB_CHARSET = os.environ.get("DB_CHARSET", "utf8mb4")
-DB_TIMEZONE = os.environ.get("DB_TIMEZONE", "Asia/Shanghai")
-DB_MAXSIZE = int(os.environ.get("DB_MAXSIZE", "20"))
-DB_MINSIZE = int(os.environ.get("DB_MINSIZE", "1"))
-DB_GENERATE_SCHEMAS = os.environ.get("DB_GENERATE_SCHEMAS", "True")
+# ----------------- 缓存配置 -----------------
+REDIS_HOST = merge_config("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(merge_config("REDIS_PORT", 6379))
+REDIS_PASSWORD = merge_config("REDIS_PASSWORD", "")
+REDIS_DB = int(merge_config("REDIS_DB", 0))
 
-# ------------- 缓存配置 -------------
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = os.environ.get("REDIS_PORT", "6379")
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
-REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
-
-# ------------- 后台登录 -------------
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "change-me")
+# ----------------- 后台登录 -----------------
+ADMIN_USERNAME = merge_config("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = merge_config("ADMIN_PASSWORD", "admin123")
+SESSION_SECRET_KEY = merge_config("SESSION_SECRET_KEY", "change-me")
 
 
 

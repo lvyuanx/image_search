@@ -101,7 +101,7 @@ async def image_add(
     if md5 and md5 != file_md5:
         return Res().fail("图片 MD5 不一致")
     contents = await file.read()
-    file_type = imghdr.what(None, h=contents)
+    file_type =  file.content_type.split('/')[-1]
     if file_type not in ["jpeg", "png", "jpg"]:
         return Res().fail("不支持的文件格式")
     res = engine_manager.add_images([(file.filename, contents)], group)

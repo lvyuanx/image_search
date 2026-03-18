@@ -1,0 +1,15 @@
+services:
+  all_system:
+    image: image_search:${IMAGE_TAG:-latest}
+    container_name: image_search_${IMAGE_PORT:-27001}
+    ports:
+      - "${IMAGE_PORT:-27001}:8001"
+    volumes:
+      - ${IMAGE_APP_PATH:-/home/ubuntu/apps/image_search}:/app
+    networks:
+      - 1panel-network
+    restart: unless-stopped   # 后台运行并自动重启
+
+networks:
+  1panel-network:
+    external: true
