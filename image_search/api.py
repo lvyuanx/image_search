@@ -83,7 +83,10 @@ async def image_search(
     file_md5 = image_util.calc_file_md5(file)
     if md5 and md5 != file_md5:
         return Res.fail("图片 MD5 不一致")
-    res = engine_manager.search(file.file.read(), group=group)
+    contents = await file.read()
+    file_type = file.content_type.split("/")[-1].lower() if file.content_type else ""
+    compressed = image_util.lossless_compress_bytes(contents, format_hint=file_type)
+    res = engine_manager.search(compressed, group=group)
     await generate_url(appid=appid, images=res)
     return Res().ok(res)
 
@@ -171,8 +174,6 @@ async def image_preview(
         image = image.convert("RGB")
 
         image = image_util.process_image(image, w, h, f)
-
-        image = image_util.compress_image(image, 75)
 
         image = image_util.add_watermark(image, "lvyuanxiang")
 
