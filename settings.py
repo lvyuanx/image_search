@@ -38,8 +38,8 @@ INSERTAPPS = [
 ]
 
 
-HOST = "0.0.0.0"
-PORT = 8001
+HOST = merge_config("HOST", "0.0.0.0")
+PORT =  merge_config("PORT", 8701)
 
 IMAGE_PREVIEW_URL_TEMPLATE = merge_config("IMAGE_PREVIEW_URL_TEMPLATE", "http://127.0.0.1:8701/api/image/preview/{group}/{name}")
 
