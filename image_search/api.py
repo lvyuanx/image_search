@@ -1,12 +1,12 @@
-import io
-import mimetypes
-import imghdr
+import hashlib
+import os
+from pathlib import Path as FsPath
 from urllib.parse import urlencode, urlparse
 from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
 from typing import Optional
 
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from app import Res
 from auth.models import Site
 from auth.sign_depends import verify_sign_dependency
@@ -162,32 +162,36 @@ async def image_preview(
 
     file_path = image_lib_dir / group / "gallery" / stored_name
 
-    # 动态获取 mime
-    media_type, _ = mimetypes.guess_type(stored_name)
-    if not media_type:
-        media_type = "image/jpeg"
+    # 统一输出为 JPEG，便于缓存与快速传输
+    media_type = "image/jpeg"
 
-    def process_image():
+    # 缓存：同一张图 + 参数命中则直接返回文件
+    cache_dir = image_lib_dir / group / "preview_cache"
+    os.makedirs(cache_dir, exist_ok=True)
 
+    def _cache_name():
+        raw_key = f"{stored_name}|{w}|{h}|{f}|watermark:lvyuanxiang"
+        digest = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
+        return f"{FsPath(stored_name).stem}_{digest}.jpg"
+
+    cache_path = cache_dir / _cache_name()
+    if cache_path.exists():
+        return FileResponse(cache_path, media_type=media_type)
+
+    def process_and_cache():
         image = Image.open(file_path)
-
         image = image.convert("RGB")
-
         image = image_util.process_image(image, w, h, f)
-
         image = image_util.add_watermark(image, "lvyuanxiang")
 
-        buffer = io.BytesIO()
+        tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
+        image.save(tmp_path, "JPEG", quality=75)
+        os.replace(tmp_path, cache_path)
 
-        image.save(buffer, "JPEG", quality=75)
+        return cache_path
 
-        buffer.seek(0)
-
-        return buffer
-
-    buffer = await run_in_threadpool(process_image)
-
-    return StreamingResponse(buffer, media_type=media_type)
+    cached_file = await run_in_threadpool(process_and_cache)
+    return FileResponse(cached_file, media_type=media_type)
        
 
     
