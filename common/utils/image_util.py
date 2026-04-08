@@ -163,6 +163,40 @@ def compress_image(img: Image.Image, quality: int = 85) -> Image.Image:
     return Image.open(buffer)
 
 
+def lossless_compress_bytes(
+    data: bytes,
+    format_hint: str | None = None,
+    lossy_quality: int = 75,
+) -> bytes:
+    """
+    Attempt a lossless (or no-op) compression on image bytes.
+    For JPEG, return original bytes to avoid lossy re-encode.
+    For PNG, use optimize=True.
+    Falls back to original bytes on any error.
+    """
+    if not data:
+        return data
+
+    fmt = (format_hint or "").lower()
+    try:
+        img = Image.open(io.BytesIO(data))
+        out = io.BytesIO()
+        # JPEG: allow lossy compression
+        if fmt in {"jpeg", "jpg"} or (img.format or "").upper() in {"JPEG", "JPG"}:
+            img = img.convert("RGB")
+            img.save(out, format="JPEG", quality=lossy_quality, optimize=True, progressive=True)
+        # Preserve PNG losslessly with optimize=True
+        elif fmt in {"png"} or (img.format or "").upper() == "PNG":
+            img.save(out, format="PNG", optimize=True)
+        else:
+            # Unknown format: do not risk lossy re-encode
+            return data
+        out.seek(0)
+        return out.read()
+    except Exception:
+        return data
+
+
 def calc_file_md5(file: UploadFile, chunk_size=8192):
     md5 = hashlib.md5()
     f = file.file  # 同步文件对象
