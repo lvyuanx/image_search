@@ -9,15 +9,17 @@ from auth.models import Site
 
 
 class SignUtil:
-    def __init__(self, appid: str, secret_key: str, timeout: int = 300):
+    def __init__(self, appid: str, secret_key: str, timeout: int = 300, site=None):
         """
         :param appid: 接口 appid
         :param secret_key: 接口 secret_key
         :param timeout: 默认超时时间（秒）
+        :param site: Site 模型实例，供调用方复用避免重复查询
         """
         self.appid = appid
         self.secret_key = secret_key
         self.timeout = timeout
+        self.site = site
 
     @staticmethod
     def _filter_params(params: Dict) -> Dict[str, str]:
@@ -123,4 +125,4 @@ async def get_sign_util(appid: str) -> SignUtil:
     if not site:
         raise HTTPException(status_code=403, detail=f"未知或未启用的 appid: {appid}")
 
-    return SignUtil(appid=site.appid, secret_key=site.secret_key)
+    return SignUtil(appid=site.appid, secret_key=site.secret_key, site=site)

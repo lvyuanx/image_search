@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path as FsPath
 from urllib.parse import urlencode, urlparse
-from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
+from fastapi import Depends, File, Path, Query, Request, UploadFile, APIRouter, UploadFile
 from typing import Optional
 
 from fastapi.concurrency import run_in_threadpool
@@ -25,12 +25,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["图库"], dependencies=[Depends(verify_sign_dependency)])
 
-async def generate_url(appid, images: dict | list[dict] = None):
+async def generate_url(signutil, images: dict | list[dict] = None):
     if images is None: return None
     if isinstance(images, dict):
         images = [images]
 
-    signutil = await get_sign_util(appid=appid)
     for image in images:
         base_url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["original_name"])
         parsed = urlparse(str(base_url))
@@ -49,14 +48,12 @@ async def generate_url(appid, images: dict | list[dict] = None):
 
 @router.get("/image", summary="获取图片列表")
 async def image_list(
+    request: Request,
     group: str = Query("default", description="图片分组"),
     page: int = Query(1, description="页码"),
     page_size: int = Query(20, description="每页数量"),
     keyword: str = Query(None, description="搜索关键词"),
     order: str = Query("desc", description="排序方式"),
-    sign: str = Query(None, description="签名"),
-    appid: str = Query(None, description="应用ID"),
-    timestamp: int = Query(None, description="时间戳"),
 ):
     res = engine_manager.list_gallery(
         group=group,
@@ -65,31 +62,29 @@ async def image_list(
         keyword=keyword,
         order=order,
     )
-    await generate_url(appid=appid, images=res["results"])
+    await generate_url(request.state.sign_util, images=res["results"])
     return Res().ok(res)
 
 @router.post("/image/search", summary="以图搜图")
 async def image_search(
+    request: Request,
     file: UploadFile = File(..., description="图片"),
     md5: str = Query(None, description="图片 MD5"),
     group: str = Query("default", description="分组"),
-    sign: str = Query(None, description="签名"),
     appid: str = Query(None, description="应用ID"),
-    timestamp: int = Query(None, description="时间戳"),
 ):
     start_at = time.perf_counter()
     success = False
     try:
-        # 检查搜索次数配额
-        site = await Site.filter(appid=appid, is_active=True).first()
-        if not site:
-            raise BusinessException(code=403, msg="无效的 appid")
-
+        # 复用 verify_sign_dependency 已查询的 site，避免重复查询
+        site = request.state.site
         if site.search_quota != -1:
             if site.search_quota <= 0:
                 raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
-            # 扣减次数
-            await Site.filter(appid=appid).update(search_quota=site.search_quota - 1)
+            # 原子扣减：带 > 0 条件防并发超扣
+            updated = await Site.filter(appid=appid, search_quota__gt=0).update(search_quota=site.search_quota - 1)
+            if not updated:
+                raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
 
         file_md5 = image_util.calc_file_md5(file)
         if md5 and md5 != file_md5:
@@ -98,7 +93,7 @@ async def image_search(
         file_type = file.content_type.split("/")[-1].lower() if file.content_type else ""
         compressed = image_util.lossless_compress_bytes(contents, format_hint=file_type)
         res = engine_manager.search(compressed, group=group)
-        await generate_url(appid=appid, images=res)
+        await generate_url(request.state.sign_util, images=res)
         success = True
         return Res().ok(res)
     finally:

@@ -53,6 +53,8 @@ async def verify_sign_dependency(request: Request):
     if not sign_util.verify_sign(params_for_sign):
         raise BusinessException(code=403, msg="签名校验失败")
 
-    # 9️⃣ 将 appid 存储到 request 中
+    # 9️⃣ 将 appid、sign_util、site 存储到 request 中，供后续处理器复用，避免重复查询
     request.state.appid = appid
     request.state.secret_key = sign_util.secret_key
+    request.state.sign_util = sign_util
+    request.state.site = sign_util.site
