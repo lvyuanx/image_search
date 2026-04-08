@@ -1,5 +1,7 @@
 import hashlib
+import logging
 import os
+import time
 from pathlib import Path as FsPath
 from urllib.parse import urlencode, urlparse
 from fastapi import Depends, File, Path, Query, UploadFile, APIRouter, UploadFile
@@ -18,6 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .image_search_engine import GROUP_BACK, IMAGE_SEARCH_WORKSPACES, get_image_search_manager
 
 engine_manager = get_image_search_manager()
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(tags=["图库"], dependencies=[Depends(verify_sign_dependency)])
@@ -74,27 +77,36 @@ async def image_search(
     appid: str = Query(None, description="应用ID"),
     timestamp: int = Query(None, description="时间戳"),
 ):
-    # 检查搜索次数配额
-    site = await Site.filter(appid=appid, is_active=True).first()
-    if not site:
-        raise BusinessException(code=403, msg="无效的 appid")
-    
-    if site.search_quota != -1:
-        if site.search_quota <= 0:
-            raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
-        # 扣减次数
-        await Site.filter(appid=appid).update(search_quota=site.search_quota - 1)
-    
-    file_md5 = image_util.calc_file_md5(file)
-    if md5 and md5 != file_md5:
-        return Res.fail("图片 MD5 不一致")
-    contents = await file.read()
-    file_type = file.content_type.split("/")[-1].lower() if file.content_type else ""
-    compressed = image_util.lossless_compress_bytes(contents, format_hint=file_type)
-    res = engine_manager.search(compressed, group=group)
-    await generate_url(appid=appid, images=res)
-    return Res().ok(res)
+    start_at = time.perf_counter()
+    success = False
+    try:
+        # 检查搜索次数配额
+        site = await Site.filter(appid=appid, is_active=True).first()
+        if not site:
+            raise BusinessException(code=403, msg="无效的 appid")
 
+        if site.search_quota != -1:
+            if site.search_quota <= 0:
+                raise BusinessException(code=403, msg="搜索次数已用尽，请联系管理员充值")
+            # 扣减次数
+            await Site.filter(appid=appid).update(search_quota=site.search_quota - 1)
+
+        file_md5 = image_util.calc_file_md5(file)
+        if md5 and md5 != file_md5:
+            return Res.fail("图片 MD5 不一致")
+        contents = await file.read()
+        file_type = file.content_type.split("/")[-1].lower() if file.content_type else ""
+        compressed = image_util.lossless_compress_bytes(contents, format_hint=file_type)
+        res = engine_manager.search(compressed, group=group)
+        await generate_url(appid=appid, images=res)
+        success = True
+        return Res().ok(res)
+    finally:
+        elapsed_ms = (time.perf_counter() - start_at) * 1000
+        logger.info(
+            f"image_search finished: appid={appid} group={group} "
+            f"filename={file.filename} success={success} elapsed_ms={elapsed_ms:.2f}"
+        )
 
 @router.post("/image", summary="添加图片")
 async def image_add(
