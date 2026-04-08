@@ -26,17 +26,22 @@ async def generate_url(appid, images: dict | list[dict] = None):
     if images is None: return None
     if isinstance(images, dict):
         images = [images]
-    
+
     signutil = await get_sign_util(appid=appid)
     for image in images:
-        url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["original_name"])
-        parsed = urlparse(str(url))
+        base_url = settings.IMAGE_PREVIEW_URL_TEMPLATE.format(group=image["group"], name=image["original_name"])
+        parsed = urlparse(str(base_url))
         url_path = parsed.path  # 不包含 query
-        sign_params = signutil.create_sign(params={
-            "url": url_path,
-        })
-        del sign_params["url"]
-        image["url"] = url + "?" + urlencode(sign_params)
+
+        # 缩略图（w=400）
+        thumb_sign = signutil.create_sign(params={"url": url_path})
+        del thumb_sign["url"]
+        image["url"] = base_url + "?" + urlencode({**thumb_sign, "w": 400})
+
+        # 大图（无损压缩 + 水印）
+        full_sign = signutil.create_sign(params={"url": url_path})
+        del full_sign["url"]
+        image["full_url"] = base_url + "?" + urlencode({**full_sign, "lossless": 1})
 
 
 @router.get("/image", summary="获取图片列表")
@@ -143,6 +148,7 @@ async def image_preview(
     w: int = Query(None, description="图片宽度"),
     h: int = Query(None, description="图片高度"),
     f: str = Query("contain", description="图片处理方式"),
+    lossless: int = Query(0, description="大图无损模式（1=启用）"),
     sign: str = Query(None, description="签名"),
     appid: str = Query(None, description="应用ID"),
     timestamp: int = Query(None, description="时间戳"),
@@ -162,36 +168,54 @@ async def image_preview(
 
     file_path = image_lib_dir / group / "gallery" / stored_name
 
-    # 统一输出为 JPEG，便于缓存与快速传输
-    media_type = "image/jpeg"
+    is_lossless = lossless == 1
 
     # 缓存：同一张图 + 参数命中则直接返回文件
     cache_dir = image_lib_dir / group / "preview_cache"
     os.makedirs(cache_dir, exist_ok=True)
 
-    def _cache_name():
-        raw_key = f"{stored_name}|{w}|{h}|{f}|watermark:lvyuanxiang"
-        digest = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
-        return f"{FsPath(stored_name).stem}_{digest}.jpg"
+    if is_lossless:
+        def _cache_name():
+            raw_key = f"{stored_name}|full|watermark:lvyuanxiang"
+            digest = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
+            return f"{FsPath(stored_name).stem}_{digest}.png"
 
-    cache_path = cache_dir / _cache_name()
-    if cache_path.exists():
-        return FileResponse(cache_path, media_type=media_type)
+        cache_path = cache_dir / _cache_name()
+        media_type = "image/png"
 
-    def process_and_cache():
-        image = Image.open(file_path)
-        image = image.convert("RGB")
-        image = image_util.process_image(image, w, h, f)
-        image = image_util.add_watermark(image, "lvyuanxiang")
+        if not cache_path.exists():
+            def process_and_cache_lossless():
+                image = Image.open(file_path)
+                image = image_util.add_watermark(image, "lvyuanxiang")
+                tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
+                image.save(tmp_path, "PNG", optimize=True)
+                os.replace(tmp_path, cache_path)
+                return cache_path
 
-        tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
-        image.save(tmp_path, "JPEG", quality=75)
-        os.replace(tmp_path, cache_path)
+            cache_path = await run_in_threadpool(process_and_cache_lossless)
+    else:
+        def _cache_name():
+            raw_key = f"{stored_name}|{w}|{h}|{f}|watermark:lvyuanxiang"
+            digest = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
+            return f"{FsPath(stored_name).stem}_{digest}.jpg"
 
-        return cache_path
+        cache_path = cache_dir / _cache_name()
+        media_type = "image/jpeg"
 
-    cached_file = await run_in_threadpool(process_and_cache)
-    return FileResponse(cached_file, media_type=media_type)
+        if not cache_path.exists():
+            def process_and_cache():
+                image = Image.open(file_path)
+                image = image.convert("RGB")
+                image = image_util.process_image(image, w, h, f)
+                image = image_util.add_watermark(image, "lvyuanxiang")
+                tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
+                image.save(tmp_path, "JPEG", quality=75)
+                os.replace(tmp_path, cache_path)
+                return cache_path
+
+            cache_path = await run_in_threadpool(process_and_cache)
+
+    return FileResponse(cache_path, media_type=media_type)
        
 
     
