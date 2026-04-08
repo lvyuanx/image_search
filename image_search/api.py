@@ -34,14 +34,14 @@ async def generate_url(appid, images: dict | list[dict] = None):
         url_path = parsed.path  # 不包含 query
 
         # 缩略图（w=400）
-        thumb_sign = signutil.create_sign(params={"url": url_path})
+        thumb_sign = signutil.create_sign(params={"url": url_path, "w": 400})
         del thumb_sign["url"]
-        image["url"] = base_url + "?" + urlencode({**thumb_sign, "w": 400})
+        image["url"] = base_url + "?" + urlencode(thumb_sign)
 
         # 大图（无损压缩 + 水印）
-        full_sign = signutil.create_sign(params={"url": url_path})
+        full_sign = signutil.create_sign(params={"url": url_path, "lossless": 1})
         del full_sign["url"]
-        image["full_url"] = base_url + "?" + urlencode({**full_sign, "lossless": 1})
+        image["full_url"] = base_url + "?" + urlencode(full_sign)
 
 
 @router.get("/image", summary="获取图片列表")
