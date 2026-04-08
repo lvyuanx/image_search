@@ -1,9 +1,11 @@
+import heapq
 import io
 import json
 import os
 import shutil
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -20,43 +22,85 @@ IMAGE_SEARCH_WORKSPACES = settings.BASE_DIR / "oss" / "media" / "groups"
 
 GROUP_BACK = settings.BASE_DIR / "oss" / "media" / "back"
 
+# 批量特征提取的 chunk 大小，防止 GPU OOM
+_FEATURE_BATCH_SIZE = 32
 
 
 # =========================================================
-# CLIP 全局单例（解决首次加载慢 + 多 group 重复加载问题）
+# 读写锁（允许多读单写）
 # =========================================================
+
+class _RWLock:
+    """简单的读写锁：多读单写，写优先。"""
+
+    def __init__(self):
+        self._read_ready = threading.Condition(threading.Lock())
+        self._readers = 0
+
+    def acquire_read(self):
+        with self._read_ready:
+            self._readers += 1
+
+    def release_read(self):
+        with self._read_ready:
+            self._readers -= 1
+            if self._readers == 0:
+                self._read_ready.notify_all()
+
+    def acquire_write(self):
+        self._read_ready.acquire()
+        while self._readers > 0:
+            self._read_ready.wait()
+
+    def release_write(self):
+        self._read_ready.release()
+
+    class _ReadCtx:
+        def __init__(self, lock): self._lock = lock
+        def __enter__(self): self._lock.acquire_read(); return self
+        def __exit__(self, *_): self._lock.release_read()
+
+    class _WriteCtx:
+        def __init__(self, lock): self._lock = lock
+        def __enter__(self): self._lock.acquire_write(); return self
+        def __exit__(self, *_): self._lock.release_write()
+
+    def read(self): return self._ReadCtx(self)
+    def write(self): return self._WriteCtx(self)
+
+
+# =========================================================
+# CLIP 全局单例
+# =========================================================
+
+torch.backends.cudnn.benchmark = True
 
 
 class ClipModelSingleton:
     _instance = None
     _lock = threading.Lock()
 
-    def __new__(cls):
-        if cls._instance:
+    @classmethod
+    def get(cls) -> "ClipModelSingleton":
+        if cls._instance is not None:
             return cls._instance
-
         with cls._lock:
-            if cls._instance:
+            if cls._instance is not None:
                 return cls._instance
-
-            instance = super().__new__(cls)
-
+            instance = object.__new__(cls)
             device = "cuda" if torch.cuda.is_available() else "cpu"
             print(f"[ImageSearch] Loading CLIP model on {device} ...")
-
             model, preprocess = clip.load("ViT-B/32", device=device)
             model.eval()
-
-            torch.backends.cudnn.benchmark = True
-
             instance.device = device
             instance.model = model
             instance.preprocess = preprocess
-
             cls._instance = instance
             print("[ImageSearch] CLIP model loaded.")
-
             return instance
+
+    def __new__(cls):
+        return cls.get()
 
 
 # =========================================================
@@ -78,10 +122,9 @@ class ImageSearchEngine:
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.deleted_dir, exist_ok=True)
 
-        self._lock = threading.RLock()
+        self._rwlock = _RWLock()
 
-        # 使用全局 CLIP 单例
-        clip_model = ClipModelSingleton()
+        clip_model = ClipModelSingleton.get()
         self.device = clip_model.device
         self.model = clip_model.model
         self.preprocess = clip_model.preprocess
@@ -90,168 +133,256 @@ class ImageSearchEngine:
         self.meta_path = os.path.join(self.data_dir, self.META_FILE)
 
         self.index = None  # 懒加载
+        # meta 结构：List[{"id": int, "stored_name": str, "original_name": str, "upload_time": str}]
+        self._meta: List[dict] = []
+        # 辅助字典，O(1) 查找
+        self._id_to_meta: Dict[int, dict] = {}
+        self._stored_to_id: Dict[str, int] = {}
+        self._original_to_ids: Dict[str, List[int]] = {}
+        # 下一个可用 ID（单调递增，不复用）
+        self._next_id: int = 0
+
         self._load_meta()
 
     # =====================================================
-    # FAISS 懒加载
+    # FAISS 懒加载（IndexIDMap 包装，支持按 ID 删除）
     # =====================================================
 
     def _ensure_index(self):
         if self.index is not None:
             return
-
         if os.path.exists(self.index_path):
-            self.index = faiss.read_index(self.index_path)
+            loaded = faiss.read_index(self.index_path)
+            # 旧格式：IndexFlatIP，迁移为 IndexIDMap
+            if not isinstance(loaded, faiss.IndexIDMap):
+                print(f"[ImageSearch] migrating index to IndexIDMap: {self.index_path}")
+                id_map = faiss.IndexIDMap(faiss.IndexFlatIP(512))
+                if loaded.ntotal > 0:
+                    vecs = faiss.rev_swig_ptr(loaded.get_xb(), loaded.ntotal * 512).reshape(loaded.ntotal, 512).copy()
+                    ids = np.array([m["id"] for m in self._meta[:loaded.ntotal]], dtype=np.int64)
+                    id_map.add_with_ids(vecs, ids)
+                self.index = id_map
+                self._save_index_unsafe()
+            else:
+                self.index = loaded
         else:
-            self.index = faiss.IndexFlatIP(512)
-            self._save_index()
+            self.index = faiss.IndexIDMap(faiss.IndexFlatIP(512))
+            self._save_index_unsafe()
 
-    def _save_index(self):
+    def _save_index_unsafe(self):
+        """调用方须持写锁。"""
         if self.index is not None:
-            faiss.write_index(self.index, self.index_path)
+            tmp = self.index_path + f".{os.getpid()}.tmp"
+            faiss.write_index(self.index, tmp)
+            os.replace(tmp, self.index_path)
 
     # =====================================================
-    # meta 持久化
+    # meta 持久化（原子写入，紧凑 JSON）
     # =====================================================
 
     def _load_meta(self):
-        if os.path.exists(self.meta_path):
-            with open(self.meta_path, "r", encoding="utf-8") as f:
-                self.filenames = json.load(f)
+        if not os.path.exists(self.meta_path):
+            return
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 兼容旧格式（直接是 list）
+        if isinstance(data, list):
+            for i, item in enumerate(data):
+                item.setdefault("id", i)
+            self._meta = data
+            self._next_id = len(data)
         else:
-            self.filenames = []
+            self._meta = data.get("items", [])
+            self._next_id = data.get("next_id", 0)
+        self._rebuild_aux_dicts()
 
-    def _save_meta(self):
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump(self.filenames, f, ensure_ascii=False, indent=2)
+    def _rebuild_aux_dicts(self):
+        self._id_to_meta.clear()
+        self._stored_to_id.clear()
+        self._original_to_ids.clear()
+        for item in self._meta:
+            fid = item["id"]
+            self._id_to_meta[fid] = item
+            self._stored_to_id[item["stored_name"]] = fid
+            self._original_to_ids.setdefault(item["original_name"], []).append(fid)
+
+    def _save_meta_unsafe(self):
+        """调用方须持写锁。原子写入。"""
+        payload = json.dumps(
+            {"next_id": self._next_id, "items": self._meta},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        tmp = self.meta_path + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp, self.meta_path)
 
     # =====================================================
-    # 特征提取
+    # 特征提取（支持批处理）
     # =====================================================
+
+    def _extract_features_batch(self, images: List[Image.Image]) -> np.ndarray:
+        """批量提取特征，返回 (N, 512) float32 数组。"""
+        all_features = []
+        for i in range(0, len(images), _FEATURE_BATCH_SIZE):
+            chunk = images[i: i + _FEATURE_BATCH_SIZE]
+            tensors = torch.stack([self.preprocess(img) for img in chunk]).to(self.device)
+            with torch.no_grad():
+                feats = self.model.encode_image(tensors)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            all_features.append(feats.cpu().numpy().astype("float32"))
+        return np.vstack(all_features)
 
     def _extract_feature(self, img: Image.Image) -> np.ndarray:
-        image = self.preprocess(img).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            feature = self.model.encode_image(image)
-
-        feature /= feature.norm(dim=-1, keepdim=True)
-        return feature.cpu().numpy().astype("float32")
+        return self._extract_features_batch([img])
 
     # =====================================================
     # 新增图片
     # =====================================================
 
-    def add_images(self, files: List[tuple[str, bytes]]) -> int:
-        new_features = []
-        new_meta = []
+    def add_images(self, files: List[tuple]) -> int:
+        if not files:
+            return 0
 
-        with self._lock:
-            self._ensure_index()
-
-            for filename, data in files:
-                new_name = f"{uuid.uuid4().hex[:8]}_{filename}"
-                path = os.path.join(self.gallery_dir, new_name)
-
-                with open(path, "wb") as f:
-                    f.write(data)
-
+        # 1. 解码并写盘（锁外，纯 I/O）
+        prepared = []
+        for filename, data in files:
+            new_name = f"{uuid.uuid4().hex[:8]}_{filename}"
+            path = os.path.join(self.gallery_dir, new_name)
+            with open(path, "wb") as f:
+                f.write(data)
+            try:
                 img = Image.open(io.BytesIO(data)).convert("RGB")
-                feat = self._extract_feature(img)
+            except Exception as e:
+                print(f"[ImageSearch] skip bad image: {filename} ({e})")
+                os.remove(path)
+                continue
+            prepared.append((new_name, filename, img))
 
-                new_features.append(feat)
+        if not prepared:
+            return 0
 
-                new_meta.append(
-                    {
-                        "stored_name": new_name,
-                        "original_name": filename,
-                        "upload_time": datetime.now().strftime("%Y%m%d%H%M%S"),
-                    }
-                )
+        # 2. GPU 批量推理（锁外）
+        images = [item[2] for item in prepared]
+        features = self._extract_features_batch(images)  # (N, 512)
 
-            if not new_features:
-                return 0
-
-            new_features = np.vstack(new_features)
-
-            self.index.add(new_features)
-            self._save_index()
-
-            self.filenames.extend(new_meta)
-            self._save_meta()
-
-        return len(new_meta)
-
-    # =====================================================
-    # 搜索
-    # =====================================================
-
-    def search_image(self, img_bytes: bytes, top_k: int = 5):
-        if not self.filenames:
-            return []
-
-        with self._lock:
+        # 3. 写入索引（持写锁，尽量短）
+        with self._rwlock.write():
             self._ensure_index()
 
-            real_top_k = min(top_k, len(self.filenames))
+            new_ids = list(range(self._next_id, self._next_id + len(prepared)))
+            self._next_id += len(prepared)
 
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            query_vec = self._extract_feature(img)
+            ids_array = np.array(new_ids, dtype=np.int64)
+            self.index.add_with_ids(features, ids_array)
+            self._save_index_unsafe()
 
+            now = datetime.now().strftime("%Y%m%d%H%M%S")
+            for (stored_name, original_name, _), fid in zip(prepared, new_ids):
+                item = {
+                    "id": fid,
+                    "stored_name": stored_name,
+                    "original_name": original_name,
+                    "upload_time": now,
+                }
+                self._meta.append(item)
+                self._id_to_meta[fid] = item
+                self._stored_to_id[stored_name] = fid
+                self._original_to_ids.setdefault(original_name, []).append(fid)
+
+            self._save_meta_unsafe()
+
+        return len(prepared)
+
+    # =====================================================
+    # 搜索（持读锁）
+    # =====================================================
+
+    def search_image(self, img_bytes: bytes, top_k: int = 5) -> List[dict]:
+        with self._rwlock.read():
+            if not self._meta:
+                return []
+
+        # 特征提取在锁外
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        query_vec = self._extract_feature(img)
+
+        with self._rwlock.read():
+            self._ensure_index()
+            real_top_k = min(top_k, len(self._meta))
             D, I = self.index.search(query_vec, real_top_k)
 
             results = []
-            for idx, score in zip(I[0], D[0]):
-                info = self.filenames[idx]
-                results.append(
-                    {
-                        "stored_name": info["stored_name"],
-                        "original_name": info["original_name"],
-                        "upload_time": info["upload_time"],
-                        "score": float(score),
-                    }
-                )
+            for fid, score in zip(I[0], D[0]):
+                if fid < 0:
+                    continue
+                item = self._id_to_meta.get(fid)
+                if item is None:
+                    continue
+                results.append({
+                    "stored_name": item["stored_name"],
+                    "original_name": item["original_name"],
+                    "upload_time": item["upload_time"],
+                    "score": float(score),
+                })
 
         return results
 
     # =====================================================
-    # 删除
+    # 删除（持写锁）
     # =====================================================
 
     def delete_image(self, stored_name: str = None, origin_name: str = None) -> bool:
         if stored_name is None and origin_name is None:
             return False
-        
-        with self._lock:
+
+        with self._rwlock.write():
             self._ensure_index()
 
-            index_to_remove = None
-            loca_stored_name = None
-            for i, item in enumerate(self.filenames):
-                origin_pass = origin_name is None or item["original_name"] == origin_name
-                stored_pass = stored_name is None or item["stored_name"] == stored_name
-                if origin_pass and stored_pass:
-                    index_to_remove = i
-                    loca_stored_name = item["stored_name"]
-                    break
+            # O(1) 查找目标 ID
+            fid = None
+            if stored_name:
+                fid = self._stored_to_id.get(stored_name)
+            elif origin_name:
+                ids = self._original_to_ids.get(origin_name, [])
+                fid = ids[0] if ids else None
 
-            if index_to_remove is None or loca_stored_name is None:
+            if fid is None:
                 return False
 
-            src = os.path.join(self.gallery_dir, loca_stored_name)
+            item = self._id_to_meta.get(fid)
+            if item is None:
+                return False
+
+            actual_stored = item["stored_name"]
+            actual_original = item["original_name"]
+
+            # 移动文件
+            src = os.path.join(self.gallery_dir, actual_stored)
             if os.path.exists(src):
-                shutil.move(src, os.path.join(self.deleted_dir, loca_stored_name))
+                shutil.move(src, os.path.join(self.deleted_dir, actual_stored))
 
-            self.index.remove_ids(np.array([index_to_remove]))
-            self._save_index()
+            # 从 FAISS 删除（IndexIDMap 支持）
+            self.index.remove_ids(np.array([fid], dtype=np.int64))
+            self._save_index_unsafe()
 
-            self.filenames.pop(index_to_remove)
-            self._save_meta()
+            # 更新内存结构
+            self._meta = [m for m in self._meta if m["id"] != fid]
+            del self._id_to_meta[fid]
+            del self._stored_to_id[actual_stored]
+            ids_list = self._original_to_ids.get(actual_original, [])
+            if fid in ids_list:
+                ids_list.remove(fid)
+            if not ids_list:
+                self._original_to_ids.pop(actual_original, None)
+
+            self._save_meta_unsafe()
 
         return True
 
     # =====================================================
-    # 分页
+    # 分页（持读锁）
     # =====================================================
 
     def list_gallery(
@@ -260,111 +391,94 @@ class ImageSearchEngine:
         page_size: int = 20,
         keyword: Optional[str] = None,
         order: str = "desc",
-    ):
-        items = self.filenames
-
-        if keyword:
-            keyword_lower = keyword.lower()
-            items = [f for f in items if keyword_lower in f["original_name"].lower()]
-
-        items = sorted(
-            items,
-            key=lambda x: x["upload_time"],
-            reverse=(order == "desc"),
-        )
-
-        total = len(items)
-        start = (page - 1) * page_size
-        end = start + page_size
-
-        return {
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "results": items[start:end],
-        }
-    
-    def rebuild_index(self) -> int:
-        """
-        重新扫描 gallery 重建索引
-        返回重建图片数量
-        """
-
-        with self._lock:
-
-            files = [
-                f for f in os.listdir(self.gallery_dir)
-                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+    ) -> dict:
+        with self._rwlock.read():
+            items = self._meta if not keyword else [
+                m for m in self._meta
+                if keyword.lower() in m["original_name"].lower()
             ]
+            items = sorted(items, key=lambda x: x["upload_time"], reverse=(order == "desc"))
+            total = len(items)
+            start = (page - 1) * page_size
+            return {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "results": items[start: start + page_size],
+            }
 
-            if not files:
-                self.index = faiss.IndexFlatIP(512)
-                self.filenames = []
-                self._save_index()
-                self._save_meta()
-                return 0
+    # =====================================================
+    # 重建索引（锁外推理，持写锁替换）
+    # =====================================================
 
-            print(f"[ImageSearch] rebuilding index ({len(files)} images) ...")
+    def rebuild_index(self) -> int:
+        files = [
+            f for f in os.listdir(self.gallery_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+        ]
 
-            features = []
-            meta = []
+        if not files:
+            with self._rwlock.write():
+                self.index = faiss.IndexIDMap(faiss.IndexFlatIP(512))
+                self._meta.clear()
+                self._next_id = 0
+                self._rebuild_aux_dicts()
+                self._save_index_unsafe()
+                self._save_meta_unsafe()
+            return 0
 
-            for filename in files:
+        print(f"[ImageSearch] rebuilding index ({len(files)} images) ...")
 
-                path = os.path.join(self.gallery_dir, filename)
+        # 锁外推理
+        images, valid_files = [], []
+        for filename in files:
+            path = os.path.join(self.gallery_dir, filename)
+            try:
+                img = Image.open(path).convert("RGB")
+                images.append(img)
+                valid_files.append((filename, path))
+            except Exception as e:
+                print(f"[ImageSearch] skip bad image: {filename} ({e})")
 
-                try:
-                    img = Image.open(path).convert("RGB")
-                    feat = self._extract_feature(img)
+        if not images:
+            return 0
 
-                    features.append(feat)
+        features = self._extract_features_batch(images)
 
-                    meta.append(
-                        {
-                            "stored_name": filename,
-                            "original_name": filename,
-                            "upload_time": datetime.fromtimestamp(
-                                os.path.getmtime(path)
-                            ).strftime("%Y%m%d_%H%M%S"),
-                        }
-                    )
+        with self._rwlock.write():
+            new_index = faiss.IndexIDMap(faiss.IndexFlatIP(512))
+            new_meta = []
+            ids = list(range(len(valid_files)))
+            new_index.add_with_ids(features, np.array(ids, dtype=np.int64))
 
-                except Exception as e:
-                    print(f"[ImageSearch] skip bad image: {filename} ({e})")
+            for fid, (filename, path) in zip(ids, valid_files):
+                new_meta.append({
+                    "id": fid,
+                    "stored_name": filename,
+                    "original_name": filename,
+                    "upload_time": datetime.fromtimestamp(
+                        os.path.getmtime(path)
+                    ).strftime("%Y%m%d%H%M%S"),
+                })
 
-            if not features:
-                return 0
-
-            features = np.vstack(features)
-
-            # 新建 index
-            new_index = faiss.IndexFlatIP(512)
-            new_index.add(features)
-
-            # 原子替换
             self.index = new_index
-            self.filenames = meta
+            self._meta = new_meta
+            self._next_id = len(valid_files)
+            self._rebuild_aux_dicts()
+            self._save_index_unsafe()
+            self._save_meta_unsafe()
 
-            self._save_index()
-            self._save_meta()
+        print(f"[ImageSearch] rebuild finished ({len(new_meta)} images)")
+        return len(new_meta)
 
-            print(f"[ImageSearch] rebuild finished ({len(meta)} images)")
+    # =====================================================
+    # 按名称精确搜索（O(1) 字典查找）
+    # =====================================================
 
-            return len(meta)
-    
-    def search_by_name_exact(self, name: str):
-        """
-        根据名称精确搜索
-        """
-
-        with self._lock:
-            results = []
-
-            for item in self.filenames:
-                if item["original_name"] == name:
-                    results.append(item)
-
-            return results
+    def search_by_name_exact(self, name: str) -> List[dict]:
+        with self._rwlock.read():
+            ids = self._original_to_ids.get(name, [])
+            return [dict(self._id_to_meta[fid]) for fid in ids if fid in self._id_to_meta]
 
 
 # =========================================================
@@ -380,6 +494,7 @@ class ImageSearchManager:
         os.makedirs(self.groups_dir, exist_ok=True)
 
         self._engines: Dict[str, ImageSearchEngine] = {}
+        self._groups: set = set(os.listdir(self.groups_dir))
         self._lock = threading.Lock()
 
     def _get_group_paths(self, group: str):
@@ -391,39 +506,33 @@ class ImageSearchManager:
         }
 
     def get_engine(self, group: str = "default") -> ImageSearchEngine:
-        with self._lock:
-            if group in self._engines:
-                return self._engines[group]
-
-            paths = self._get_group_paths(group)
-
-            engine = ImageSearchEngine(
-                gallery_dir=paths["gallery"],
-                data_dir=paths["data"],
-                deleted_dir=paths["deleted"],
-            )
-
-            self._engines[group] = engine
+        # 快速路径：无需持锁
+        engine = self._engines.get(group)
+        if engine is not None:
             return engine
 
-    def list_groups(self):
-        return os.listdir(self.groups_dir)
-    
-    def add_images(
-        self,
-        files: List[tuple[str, bytes]],
-        group: str = "default",
-    ) -> int:
-        """
-        files: [(filename, bytes), ...]
-        group: 分组名称
-        """
+        # 慢路径：初始化引擎（初始化在锁外完成，避免阻塞）
+        paths = self._get_group_paths(group)
+        new_engine = ImageSearchEngine(
+            gallery_dir=paths["gallery"],
+            data_dir=paths["data"],
+            deleted_dir=paths["deleted"],
+        )
+        with self._lock:
+            # 双重检查，防止并发时重复初始化
+            if group not in self._engines:
+                self._engines[group] = new_engine
+                self._groups.add(group)
+            return self._engines[group]
 
-        engine = self.get_engine(group)
-        return engine.add_images(files)
+    def list_groups(self) -> List[str]:
+        return list(self._groups)
+
+    def add_images(self, files: List[tuple], group: str = "default") -> int:
+        return self.get_engine(group).add_images(files)
 
     def delete_image(self, stored_name: str = None, origin_name: str = None, group: Optional[str] = None):
-        if not stored_name and not origin_name: 
+        if not stored_name and not origin_name:
             return False
         if group:
             return self.get_engine(group).delete_image(stored_name, origin_name)
@@ -431,30 +540,31 @@ class ImageSearchManager:
         for g in self.list_groups():
             if self.get_engine(g).delete_image(stored_name, origin_name):
                 return True
-
         return False
 
-    def search(self, img_bytes: bytes, group: Optional[str] = None, top_k: int = 10):
-        results = []
-
+    def search(self, img_bytes: bytes, group: Optional[str] = None, top_k: int = 10) -> List[dict]:
         if group:
-            group_results = self.get_engine(group).search_image(img_bytes, top_k)
-            for r in group_results:
+            results = self.get_engine(group).search_image(img_bytes, top_k)
+            for r in results:
                 r["group"] = group
-            return group_results
+            return results
 
-        for g in self.list_groups():
-            group_results = self.get_engine(g).search_image(img_bytes, top_k)
-            for r in group_results:
-                r["group"] = g
-                results.append(r)
+        groups = self.list_groups()
+        # 各 group 并行搜索
+        all_results = []
+        with ThreadPoolExecutor(max_workers=min(len(groups), 8)) as pool:
+            futures = {pool.submit(self.get_engine(g).search_image, img_bytes, top_k): g for g in groups}
+            for future in as_completed(futures):
+                g = futures[future]
+                try:
+                    for r in future.result():
+                        r["group"] = g
+                        all_results.append(r)
+                except Exception as e:
+                    print(f"[ImageSearch] search error in group {g}: {e}")
 
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:top_k]
-
-        # =====================================================
-    # 分页（支持单组 / 全局）
-    # =====================================================
+        all_results.sort(key=lambda x: x["score"], reverse=True)
+        return all_results[:top_k]
 
     def list_gallery(
         self,
@@ -463,103 +573,96 @@ class ImageSearchManager:
         page_size: int = 20,
         keyword: Optional[str] = None,
         order: str = "desc",
-    ):
-        # 单组查询
+    ) -> dict:
         if group:
-            engine = self.get_engine(group)
-            result = engine.list_gallery(
-                page=page,
-                page_size=page_size,
-                keyword=keyword,
-                order=order,
-            )
-
-            # 补充 group 字段
+            result = self.get_engine(group).list_gallery(page=page, page_size=page_size, keyword=keyword, order=order)
             for item in result["results"]:
                 item["group"] = group
-
             return result
 
-        # ============================
-        # 全局查询（合并所有 group）
-        # ============================
+        groups = self.list_groups()
+        reverse = (order == "desc")
 
-        all_items = []
-
-        for g in self.list_groups():
+        # 各 group 并行取全部条目，使用堆归并避免全量 sort
+        def _get_all(g):
             engine = self.get_engine(g)
+            with engine._rwlock.read():
+                items = engine._meta if not keyword else [
+                    m for m in engine._meta
+                    if keyword.lower() in m["original_name"].lower()
+                ]
+                # 每个 group 内部先排序（数据量小时快）
+                return sorted(items, key=lambda x: x["upload_time"], reverse=reverse), g
 
-            # 取全部数据（再统一分页）
-            items = engine.list_gallery(
-                page=1,
-                page_size=10**9,
-                keyword=keyword,
-                order=order,
-            )["results"]
+        sorted_per_group = []
+        with ThreadPoolExecutor(max_workers=min(len(groups), 8)) as pool:
+            for items, g in pool.map(_get_all, groups):
+                for item in items:
+                    item["group"] = g
+                sorted_per_group.append(items)
 
-            for item in items:
-                item["group"] = g
-                all_items.append(item)
+        # 堆归并 k 路有序列表
+        key_fn = lambda x: x["upload_time"]
+        if reverse:
+            merged = heapq.merge(*sorted_per_group, key=key_fn, reverse=True)
+        else:
+            merged = heapq.merge(*sorted_per_group, key=key_fn)
 
-        # 全局排序
-        all_items = sorted(
-            all_items,
-            key=lambda x: x["upload_time"],
-            reverse=(order == "desc"),
-        )
-
-        total = len(all_items)
         start = (page - 1) * page_size
-        end = start + page_size
+        # 跳过前 start 条，取 page_size 条
+        result_items = []
+        for i, item in enumerate(merged):
+            if i < start:
+                continue
+            result_items.append(item)
+            if len(result_items) == page_size:
+                break
+
+        # 总数需要遍历，用并行结果的 sum
+        total = sum(len(items) for items in sorted_per_group)
 
         return {
             "total": total,
             "page": page,
             "page_size": page_size,
-            "results": all_items[start:end],
+            "results": result_items,
         }
-    
-    
-    def rebuild_index(self, group: Optional[str] = None):
-        """
-        重建索引
-        """
 
+    def rebuild_index(self, group: Optional[str] = None) -> dict:
         if group:
             return {group: self.get_engine(group).rebuild_index()}
-
+        groups = self.list_groups()
         results = {}
-
-        for g in self.list_groups():
-            results[g] = self.get_engine(g).rebuild_index()
-
+        with ThreadPoolExecutor(max_workers=min(len(groups), 4)) as pool:
+            futures = {pool.submit(self.get_engine(g).rebuild_index): g for g in groups}
+            for future in as_completed(futures):
+                g = futures[future]
+                try:
+                    results[g] = future.result()
+                except Exception as e:
+                    print(f"[ImageSearch] rebuild error in group {g}: {e}")
+                    results[g] = -1
         return results
 
-    def search_by_name_exact(self, name: str, group: Optional[str] = None):
-        """
-        根据名称精确搜索
-        """
-
-        results = []
-
+    def search_by_name_exact(self, name: str, group: Optional[str] = None) -> List[dict]:
         if group:
             items = self.get_engine(group).search_by_name_exact(name)
-
             for item in items:
-                item = dict(item)
                 item["group"] = group
-                results.append(item)
+            return items
 
-            return results
-
-        for g in self.list_groups():
-            items = self.get_engine(g).search_by_name_exact(name)
-
-            for item in items:
-                item = dict(item)
-                item["group"] = g
-                results.append(item)
-
+        groups = self.list_groups()
+        results = []
+        with ThreadPoolExecutor(max_workers=min(len(groups), 8)) as pool:
+            futures = {pool.submit(self.get_engine(g).search_by_name_exact, name): g for g in groups}
+            for future in as_completed(futures):
+                g = futures[future]
+                try:
+                    for item in future.result():
+                        item["group"] = g
+                        results.append(item)
+                except Exception as e:
+                    print(f"[ImageSearch] search_by_name error in group {g}: {e}")
         return results
 
 
@@ -574,16 +677,14 @@ _manager: ImageSearchManager = None
 _manager_lock = threading.Lock()
 
 
-def get_image_search_manager():
+def get_image_search_manager() -> ImageSearchManager:
     global _manager
-
+    if _manager is not None:
+        return _manager
     with _manager_lock:
-        if _manager:
+        if _manager is not None:
             return _manager
-
-        # 启动时预热模型（解决首次慢）
-        ClipModelSingleton()
-
+        ClipModelSingleton.get()
         _manager = ImageSearchManager(base_workspace=_workspace)
         return _manager
 
@@ -593,21 +694,9 @@ def get_image_search_manager():
 # =========================================================
 
 def warm_up_image_search():
-    """
-    启动时预热：
-    - 加载 CLIP
-    - 初始化 CUDA
-    - 跑一次 dummy forward
-    """
-
-    clip_model = ClipModelSingleton()
-
-    # 构造一个假的 224x224 图片
+    clip_model = ClipModelSingleton.get()
     dummy = Image.new("RGB", (224, 224), (255, 255, 255))
-
-    image = clip_model.preprocess(dummy).unsqueeze(0).to(clip_model.device)
-
+    tensor = clip_model.preprocess(dummy).unsqueeze(0).to(clip_model.device)
     with torch.no_grad():
-        _ = clip_model.model.encode_image(image)
-
+        _ = clip_model.model.encode_image(tensor)
     print("[ImageSearch] Warm up finished.")
